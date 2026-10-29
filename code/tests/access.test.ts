@@ -86,7 +86,7 @@ describe('what the lobby TV is told', () => {
     // Put a note and a named author on a room, so there is something to leak.
     setStatus({
       roomId: 'room-sunshine',
-      locationId: 'loc-playground',
+      locationId: 'loc-outside',
       note: 'Ada is staying inside with Priya today',
       version: null,
       actor: findStaff('usr-priya')!,
@@ -108,7 +108,7 @@ describe('what the lobby TV is told', () => {
 
   it('still tells the TV what it needs: place, age group, and how old the claim is', () => {
     const room = buildBoard('kiosk').rooms.find((entry) => entry.id === 'room-sunshine')!;
-    assert.equal(room.location, 'Outside / Playground');
+    assert.equal(room.location, 'Outside Play Area');
     assert.equal(room.ageGroup, '18 months – 3 years');
     assert.equal(room.freshness, 'fresh');
     assert.equal(typeof room.minutesSince, 'number');
