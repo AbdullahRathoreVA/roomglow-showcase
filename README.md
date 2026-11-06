@@ -24,11 +24,16 @@ states, all legible at a glance:
 
 | What you see | What it means |
 |---|---|
-| **In Classroom** · "Confirmed 6 min ago · 8:45 p.m." | An educator said so, recently |
-| **Outside / Playground** · "Back by 8:57 p.m." | With an expected return time |
-| **Heading Back Indoors** · amber stripes, *"longer than usual"* | A transition open for 14 minutes against a 10-minute threshold — reception will not send a parent to an empty playground |
-| **In Classroom** · amber, *"Not confirmed since 7:16 p.m. (1h 35m ago)"* | Probably still true. Not recently confirmed, and it says so |
-| **Not set today** · grey | Nobody has set it. **The board never guesses** — there is no default "In Classroom" |
+| **In Room** · "Confirmed 12 min ago · 8:29 p.m." | An educator said so, recently |
+| **Outside Play Area** · "Back by 8:47 p.m." | With an expected return time |
+| **with Sunshine Room** · and Sunshine Room's own place beneath it | Two rooms have combined. Reception gets the whole answer from either card |
+| **In Room** · amber stripes, *"Not confirmed since 7:06 p.m. (1h 35m ago)"* | Probably still true. Not recently confirmed, and it says so |
+| **Not set today** · grey | Nobody has set it. **The board never guesses** — there is no default "In Room" |
+
+The place list is the centre's, not the software's. This centre runs four: In Room, Flex
+Room, Outside Play Area, Nap Time. An earlier revision shipped five, including a
+*transition* state with its own overdue warning; the centre did not use it, so it was
+taken off the board and kept in the schema with a test still proving the warning fires.
 
 What is deliberately **not** on that screen: any child's name, any photograph, any head
 count, any educator's name, any note staff have typed. The server builds a separate,
@@ -41,14 +46,44 @@ event stream.
 ![The teacher tablet](screenshots/04-teacher-tablet.jpg)
 
 One tap. No menu, no confirmation step, no scrolling. Targets are 72px and the most
-frequent action is reachable without looking. Sign-in is a 4-digit PIN on a keypad,
-because the alternative is typing an email address while holding a child.
+frequent action is reachable without looking.
+
+Signing the tablet in is the centre's choice, because the honest trade-off is theirs to
+make. **Tap the room** and start is the default: fast, and a change is recorded against
+"Rainbow tablet". **A PIN per educator** records it against a person. Everything else —
+the times, the history, the override record — is identical either way, and the setting
+says exactly that rather than implying the PIN is the safe option.
 
 The sign-in screen lists **rooms, never staff names** — no personal information leaves the
 server before somebody has proved who they are.
 
 If a tap cannot reach the server, the tablet says **"not saved"** and offers a retry.
 Nothing is queued silently; nothing claims to have saved when it has not.
+
+## Two things the first week asked for
+
+Neither was in the plan. Both are the kind of thing only a real building produces.
+
+**Rooms combine.** When numbers drop at either end of the day, one room's children move
+in with another's — and the board had no way to say it, so a room would sit there reading
+"In Room" while its children were two doors away. A merge is not a place, so it is not
+stored as one: the room points at its host, inherits where that host is, and the host's
+own card names who is in with it. Tapping any place ends the merge, because a room that
+says where it is has plainly stopped being merged — there is no second button to
+remember. Chains are refused in both directions, since the room at the far end of one
+would show no place at all.
+
+**The television could not be typed into.** The lobby screen is driven by a browser with
+a remote control and no keyboard, and the setup instruction was "open the kiosk link from
+the admin page" — a forty-character key nobody finishes entering. Who may open the board
+is now the centre's own switch. Closed by default; open means one plain address that
+works first time on any screen, with what that costs written in full next to it. The
+payload did not change: the lobby screen's version is still built separately, and the
+tests still prove no note, no educator name and no child data crosses either way.
+
+A smaller one in the same spirit: televisions run browsers years behind a phone, so every
+modern CSS value on that page has a flat fallback under it, and a classic script says so
+in words if the real board never loads — rather than leaving "Loading" up for ever.
 
 ## Reception and administration
 
@@ -126,7 +161,7 @@ after a reconnect the screen is simply correct, whatever it missed.
 
 ## Testing
 
-**79 automated tests, all driving the real HTTP server** against a throwaway database —
+**102 automated tests, all driving the real HTTP server** against a throwaway database —
 no mocks. The reason is a scar from an earlier project: a `SELECT *` once shipped password
 hashes to a browser, invisible to the type system and obvious in a response body.
 
@@ -145,8 +180,18 @@ Three real bugs the tests caught during the build:
 A fourth was caught by the browser rather than a test: the Content-Security-Policy forbids
 inline `style` attributes, and several had been written into the markup.
 
+A fifth was caught by a script written for exactly this, and would have been the worst of
+them: `node:sqlite` enables foreign keys at construction — the opposite of the `sqlite3`
+command line, and the opposite of the comment in this project's own file. A later
+migration rebuilds a table, and the rebuild failed under that constraint. Every test
+passed, because tests start from an empty database that runs all migrations at once. An
+existing centre's database would simply have refused to open. There is now a check that
+builds a database the way the previous version left it and opens it with the current
+code, and it reads the expected schema version out of the schema rather than from a
+number somebody has to remember to update.
+
 **Live, against the deployed server:** a teacher's tap reached the front-desk stream in
-**669ms**, with the staff note and the educator's name confirmed absent from the wire.
+**1.0s**, with the staff note and the educator's name confirmed absent from the wire.
 
 ## Privacy, deliberately
 

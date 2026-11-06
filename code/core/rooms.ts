@@ -21,7 +21,7 @@ import { presence, type Audience } from './events.ts';
 import { clampText, minutesBetween, newId, nowIso } from './util.ts';
 import type { User } from './auth.ts';
 
-export type LocationKind = 'indoor' | 'outdoor' | 'transition' | 'activity' | 'offsite';
+export type LocationKind = 'indoor' | 'outdoor' | 'transition' | 'activity' | 'offsite' | 'rest';
 
 export interface Location {
   id: string;
@@ -97,6 +97,7 @@ interface StateRow {
   source: string | null;
   confirm_requested_at: string | null;
   confirm_requested_by: string | null;
+  merged_into: string | null;
 }
 
 /** What the lobby TV is allowed to know. No names. No notes. By construction. */
@@ -113,6 +114,10 @@ export interface KioskRoom {
   minutesSince: number | null;
   freshness: Freshness;
   backBy: string | null;
+  /** Set when this room's children are with another room. */
+  mergedInto: { id: string; name: string; shortName: string } | null;
+  /** Rooms that have merged into this one. */
+  hosting: Array<{ id: string; name: string; shortName: string }>;
 }
 
 /** What a signed-in member of staff sees in addition. */
@@ -155,6 +160,15 @@ interface JoinedRow extends StateRow, Room {
   location_label: string | null;
   location_kind: LocationKind | null;
   location_icon: string | null;
+  /** When merged, the host room's own place is what reception actually needs. */
+  host_id: string | null;
+  host_name: string | null;
+  host_short: string | null;
+  host_label: string | null;
+  host_location_id: string | null;
+  host_kind: LocationKind | null;
+  host_icon: string | null;
+  host_updated_at: string | null;
 }
 
 function joinedRows(roomId?: string): JoinedRow[] {
@@ -162,11 +176,17 @@ function joinedRows(roomId?: string): JoinedRow[] {
     `SELECT r.id, r.name, r.short_name, r.age_group, r.accent, r.sort_order, r.archived_at,
             s.room_id, s.location_id, s.note, s.back_by, s.version, s.updated_at,
             s.actor_id, s.actor_name, s.actor_role, s.source,
-            s.confirm_requested_at, s.confirm_requested_by,
-            l.label AS location_label, l.kind AS location_kind, l.icon AS location_icon
+            s.confirm_requested_at, s.confirm_requested_by, s.merged_into,
+            l.label AS location_label, l.kind AS location_kind, l.icon AS location_icon,
+            h.id AS host_id, h.name AS host_name, h.short_name AS host_short,
+            hl.label AS host_label, hl.kind AS host_kind, hl.icon AS host_icon,
+            hs.location_id AS host_location_id, hs.updated_at AS host_updated_at
        FROM rooms r
        LEFT JOIN room_state s ON s.room_id = r.id
        LEFT JOIN locations  l ON l.id = s.location_id
+       LEFT JOIN rooms      h  ON h.id = s.merged_into
+       LEFT JOIN room_state hs ON hs.room_id = h.id
+       LEFT JOIN locations  hl ON hl.id = hs.location_id
       WHERE r.archived_at IS NULL ${roomId ? 'AND r.id = ?' : ''}
       ORDER BY r.sort_order, r.name`,
     ...(roomId ? [roomId] : []),
@@ -174,20 +194,32 @@ function joinedRows(roomId?: string): JoinedRow[] {
 }
 
 function toKiosk(row: JoinedRow, limits: ReturnType<typeof thresholds>, now: string): KioskRoom {
-  const { freshness, minutesSince } = freshnessOf(row, row.location_kind, limits, now);
+  // A merged room borrows the host's place, because the host's name on its own
+  // leaves reception asking a second question. It borrows the host's confirmation time
+  // too: the claim that matters is the one about where those children physically are.
+  const merged = row.merged_into && row.host_id;
+  const kind = merged ? row.host_kind : row.location_kind;
+  const { freshness, minutesSince } = merged
+    ? freshnessOf({ updated_at: row.host_updated_at, location_id: row.host_location_id }, kind, limits, now)
+    : freshnessOf(row, kind, limits, now);
+
   return {
     id: row.id,
     name: row.name,
     shortName: row.short_name,
     ageGroup: row.age_group,
     accent: row.accent,
-    location: row.location_label,
-    locationKind: row.location_kind,
-    icon: row.location_icon,
-    updatedAt: row.updated_at,
+    location: merged ? row.host_label : row.location_label,
+    locationKind: kind,
+    icon: merged ? row.host_icon : row.location_icon,
+    updatedAt: merged ? row.host_updated_at : row.updated_at,
     minutesSince,
     freshness,
-    backBy: row.back_by,
+    backBy: merged ? null : row.back_by,
+    mergedInto: merged
+      ? { id: row.host_id!, name: row.host_name!, shortName: row.host_short! }
+      : null,
+    hosting: [],
   };
 }
 
@@ -219,6 +251,18 @@ export function buildBoard(audience: Audience): Board {
     audience === 'kiosk'
       ? rows.map((row) => toKiosk(row, limits, now))
       : rows.map((row) => toStaff(row, limits, now, devices));
+
+  // The other side of a merge: a host room should say who is in with it, so the front
+  // desk reads the answer from whichever card it happens to look at.
+  const byId = new Map(rooms.map((room) => [room.id, room]));
+  for (const room of rooms) {
+    if (!room.mergedInto) continue;
+    byId.get(room.mergedInto.id)?.hosting.push({
+      id: room.id,
+      name: room.name,
+      shortName: room.shortName,
+    });
+  }
 
   return {
     audience,
@@ -335,7 +379,10 @@ export function setStatus(input: SetStatusInput): SetStatusOutcome {
          actor_role  = excluded.actor_role,
          source      = excluded.source,
          confirm_requested_at = NULL,
-         confirm_requested_by = NULL`,
+         confirm_requested_by = NULL,
+         -- Saying where you are ends any merge: a room cannot be both somewhere of its
+         -- own and inside another room.
+         merged_into = NULL`,
       input.roomId,
       input.locationId,
       note,
@@ -370,6 +417,72 @@ export function setStatus(input: SetStatusInput): SetStatusOutcome {
   });
 }
 
+export type MergeOutcome =
+  | { status: 'ok'; room: StaffRoom }
+  | { status: 'no_room' }
+  | { status: 'no_host' }
+  | { status: 'self' }
+  | { status: 'chain'; hostName: string }
+  | { status: 'hosting'; guestNames: string[] };
+
+/**
+ * Put one room's children in with another's.
+ *
+ * Refused in either direction that would make a chain - a host that has itself moved on,
+ * or a room that is already hosting somebody else. Two hops would mean the board sending
+ * reception to a room that is not there either, and the card of the room at the far end
+ * would show no place at all. A chain is also a sign somebody tapped the wrong tile
+ * rather than something a centre means to do; the refusal says which tile to tap.
+ */
+export function mergeRoom(roomId: string, intoRoomId: string, actor: User): MergeOutcome {
+  const room = findRoom(roomId);
+  if (!room || room.archived_at) return { status: 'no_room' };
+  if (roomId === intoRoomId) return { status: 'self' };
+
+  const host = findRoom(intoRoomId);
+  if (!host || host.archived_at) return { status: 'no_host' };
+
+  const hostState = one<StateRow>('SELECT * FROM room_state WHERE room_id = ?', intoRoomId);
+  if (hostState?.merged_into) {
+    const target = findRoom(hostState.merged_into);
+    return { status: 'chain', hostName: target?.name ?? 'another room' };
+  }
+
+  const guests = many<{ name: string }>(
+    `SELECT r.name FROM room_state s JOIN rooms r ON r.id = s.room_id
+      WHERE s.merged_into = ? AND r.archived_at IS NULL ORDER BY r.sort_order`,
+    roomId,
+  );
+  if (guests.length) return { status: 'hosting', guestNames: guests.map((row) => row.name) };
+
+  const at = nowIso();
+  run(
+    `INSERT INTO room_state (room_id, version, merged_into, updated_at, actor_id, actor_name, actor_role, source,
+                             location_id, note, back_by, confirm_requested_at, confirm_requested_by)
+     VALUES (?, 1, ?, ?, ?, ?, ?, 'teacher', NULL, NULL, NULL, NULL, NULL)
+     ON CONFLICT(room_id) DO UPDATE SET
+       merged_into = excluded.merged_into,
+       location_id = NULL,
+       note        = NULL,
+       back_by     = NULL,
+       version     = room_state.version + 1,
+       updated_at  = excluded.updated_at,
+       actor_id    = excluded.actor_id,
+       actor_name  = excluded.actor_name,
+       actor_role  = excluded.actor_role,
+       source      = excluded.source,
+       confirm_requested_at = NULL,
+       confirm_requested_by = NULL`,
+    roomId,
+    intoRoomId,
+    at,
+    actor.id,
+    actor.name,
+    actor.role,
+  );
+  return { status: 'ok', room: roomForStaff(roomId)! };
+}
+
 /** Reception asks a room to confirm where it is. One tap instead of a phone call. */
 export function requestConfirmation(roomId: string, actor: User): StaffRoom | null {
   const room = findRoom(roomId);
@@ -400,6 +513,7 @@ export function clearBoard(): number {
     `UPDATE room_state SET location_id = NULL, note = NULL, back_by = NULL, updated_at = NULL,
                            actor_id = NULL, actor_name = NULL, actor_role = NULL, source = NULL,
                            confirm_requested_at = NULL, confirm_requested_by = NULL,
+                           merged_into = NULL,
                            version = version + 1`,
   ).changes;
 }
@@ -506,7 +620,16 @@ export function updateRoom(
 
 /** Archived, never deleted: the history of a closed room is still the centre's record. */
 export function archiveRoom(id: string): boolean {
-  return run('UPDATE rooms SET archived_at = ? WHERE id = ? AND archived_at IS NULL', nowIso(), id).changes > 0;
+  const archived = run(
+    'UPDATE rooms SET archived_at = ? WHERE id = ? AND archived_at IS NULL',
+    nowIso(),
+    id,
+  ).changes > 0;
+  // Anyone who was in with this room is now in with nothing. Say "not set today" on
+  // purpose rather than by accident: the merge is cleared and the version moves, so the
+  // rooms involved are asked to confirm like any other room nobody has set.
+  if (archived) run('UPDATE room_state SET merged_into = NULL, version = version + 1 WHERE merged_into = ?', id);
+  return archived;
 }
 
 export function createLocation(input: { label: string; kind: LocationKind; icon?: string }): Location {

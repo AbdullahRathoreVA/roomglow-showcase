@@ -108,6 +108,50 @@ function startSession(user: User, userAgent: string | null): Session {
   return { token, csrf, expiresAt, user };
 }
 
+/**
+ * How a room's tablet signs in. The centre chooses.
+ *
+ *   'none' — tap the room and start. No PIN, no keyboard, nothing to forget or share.
+ *   'pin'  — a four-digit PIN names the individual educator making each change.
+ *
+ * 'none' is the default because this is a tablet mounted in one room inside a locked
+ * building, and an educator with a child on one hip should not be typing. What it costs
+ * is the name: a status change is attributed to "Sunshine Room tablet" rather than to a
+ * person. Everything else — the times, the history, the override record — is unchanged.
+ */
+export type TabletSignIn = 'none' | 'pin';
+
+/**
+ * Find or create the account a room's own tablet acts as.
+ *
+ * It is a real user row, so the board, the history and the audit log need no special
+ * case for it, and it is assigned to exactly one room, so the usual room check still
+ * stops one tablet changing another room. `is_demo` is 0: these are not seeded demo
+ * logins and must not block production mode from starting.
+ */
+export function signInRoomDevice(roomId: string, roomName: string, userAgent: string | null): Session {
+  const id = `dev-${roomId}`;
+  const label = `${roomName} tablet`;
+  const existing = one<User>(`SELECT ${USER_COLUMNS} FROM users u WHERE u.id = ?`, id);
+
+  if (!existing) {
+    run(
+      `INSERT INTO users (id, name, email, role, password_hash, pin_hash, status, is_demo, created_at)
+       VALUES (?,?,NULL,'teacher',NULL,NULL,'active',0,?)`,
+      id,
+      label,
+      nowIso(),
+    );
+  } else if (existing.name !== label) {
+    // The room was renamed. The history keeps the old name on old rows, which is correct.
+    run('UPDATE users SET name = ? WHERE id = ?', label, id);
+  }
+  run('INSERT OR IGNORE INTO user_rooms (user_id, room_id) VALUES (?,?)', id, roomId);
+
+  const user = one<User>(`SELECT ${USER_COLUMNS} FROM users u WHERE u.id = ?`, id)!;
+  return startSession(user, userAgent);
+}
+
 export function loginWithPassword(email: string, password: string, userAgent: string | null): Session | null {
   const row = one<User & { password_hash: string | null }>(
     `SELECT id, name, email, role, status, is_demo, created_at, last_login_at, password_hash
